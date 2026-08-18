@@ -1,10 +1,8 @@
-
 import 'dotenv/config';
 import http from 'http';
 import express from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const app = express();
 app.use(cors());
@@ -18,10 +16,8 @@ if (!API_KEY) {
   console.warn('AVISO: GEMINI_API_KEY não configurada nas variáveis de ambiente.');
 }
 
-const genAI = new GoogleGenerativeAI(API_KEY);
-
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, model: MODEL_NAME, provider: 'Google AI Studio (Gratuito)' });
+  res.json({ ok: true, model: MODEL_NAME, provider: 'Google AI Studio (Direct HTTP)' });
 });
 
 app.post('/api/generate', async (req, res) => {
@@ -35,8 +31,10 @@ app.post('/api/generate', async (req, res) => {
       });
     }
 
-    const generativeModel = genAI.getGenerativeModel({
-      model: MODEL_NAME,
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
+    
+    const bodyData = {
+      contents,
       generationConfig: {
         maxOutputTokens: config?.maxOutputTokens || 3000,
         temperature: config?.temperature,
@@ -44,36 +42,47 @@ app.post('/api/generate', async (req, res) => {
         topK: config?.topK,
         responseMimeType: config?.responseMimeType,
         responseSchema: config?.responseSchema,
-      },
-      systemInstruction: systemInstruction ? systemInstruction : undefined,
+      }
+    };
+
+    if (systemInstruction) {
+      bodyData.systemInstruction = typeof systemInstruction === 'string' 
+        ? { parts: [{ text: systemInstruction }] } 
+        : systemInstruction;
+    }
+
+    const apiResponse = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyData)
     });
 
-    const result = await generativeModel.generateContent({ contents });
+    const data = await apiResponse.json();
 
-    const response = result.response;
-    const text = response.text ? response.text() : '';
-    const candidate = response?.candidates?.[0];
-    const finishReason = candidate?.finishReason;
+    if (!apiResponse.ok) {
+      return res.status(apiResponse.status).json(data);
+    }
+
+    const candidate = data?.candidates?.[0];
+    const text = candidate?.content?.parts?.map(p => p.text || '').join('') || '';
 
     res.json({
       text,
-      candidates: response?.candidates || [],
-      finishReason,
+      candidates: data?.candidates || [],
+      finishReason: candidate?.finishReason,
     });
   } catch (error) {
     console.error('Erro ao chamar Gemini API:', error?.message || error);
-
-    const status = error?.code || error?.status || 500;
-    res.status(typeof status === 'number' ? status : 500).json({
+    res.status(500).json({
       error: 'GEMINI_API_ERROR',
-      message: error?.message || 'Erro desconhecido ao chamar o Gemini.',
+      message: error?.message || 'Erro interno ao chamar o Gemini.',
     });
   }
 });
 
 const server = http.createServer(app);
 
-// Relay de voz para Google AI Studio via WebSocket
+// Relay de voz via WebSocket
 const wss = new WebSocketServer({ server, path: '/live' });
 
 wss.on('connection', async (clientWs) => {
@@ -97,12 +106,10 @@ wss.on('connection', async (clientWs) => {
       if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1000, reason?.toString() || 'upstream_closed');
     });
 
-    upstreamWs.on('error', (err) => {
-      console.error('Erro no upstream do Gemini Live:', err?.message || err);
+    upstreamWs.on('error', () => {
       if (clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'upstream_error');
     });
   } catch (err) {
-    console.error('Falha ao conectar no Gemini Live:', err?.message || err);
     clientWs.close(1011, 'connection_failed');
     return;
   }
@@ -122,13 +129,10 @@ wss.on('connection', async (clientWs) => {
 });
 
 app.get('/live-config', (_req, res) => {
-  res.json({
-    model: `models/${MODEL_LIVE}`,
-  });
+  res.json({ model: `models/${MODEL_LIVE}` });
 });
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`Servidor VOIDY rodando na porta ${PORT}`);
-  console.log(`Modelo texto: ${MODEL_NAME} | Modelo voz: ${MODEL_LIVE}`);
 });
