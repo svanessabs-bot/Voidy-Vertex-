@@ -8,11 +8,10 @@
     "dev": "node index.js"
   },
   "dependencies": {
-    "@google-cloud/vertexai": "^1.9.3",
+    "@google/genai": "^0.3.0",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "dotenv": "^16.4.5",
-    "ws": "^8.18.0",
-    "google-auth-library": "^9.15.0"
+    "ws": "^8.18.0"
   }
 }
