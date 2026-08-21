@@ -30,6 +30,37 @@ app.get('/health', (_req, res) => {
  * { contents, systemInstruction, config: { maxOutputTokens, ... } }
  * Isso evita reescrever toda a lógica de prepareHistory que já existe no cliente.
  */
+
+// Chama a API Gemini com retry automático em caso de sobrecarga (503) ou
+// limite de requisições (429), com espera crescente entre tentativas.
+// Depois de MAX_RETRIES tentativas, desiste e devolve o erro pro app avisar
+// o usuário, em vez de ficar preso "processando" para sempre.
+const MAX_RETRIES = 3;
+const RETRY_DELAYS_MS = [1000, 3000, 6000]; // 1s, depois 3s, depois 6s
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function generateWithRetry(params) {
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (error) {
+      lastError = error;
+      const status = error?.status || error?.code;
+      const isOverloaded = status === 503 || status === 429 || /overloaded|unavailable|too many requests/i.test(error?.message || '');
+
+      if (!isOverloaded || attempt === MAX_RETRIES) {
+        throw error; // Erro definitivo (não é sobrecarga) ou já esgotou as tentativas
+      }
+
+      console.warn(`Modelo sobrecarregado (tentativa ${attempt + 1}/${MAX_RETRIES + 1}). Tentando de novo em ${RETRY_DELAYS_MS[attempt] / 1000}s...`);
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastError;
+}
+
 app.post('/api/generate', async (req, res) => {
   try {
     const { contents, systemInstruction, config } = req.body || {};
@@ -38,7 +69,7 @@ app.post('/api/generate', async (req, res) => {
       return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Campo "contents" é obrigatório e deve ser um array.' });
     }
 
-    const result = await ai.models.generateContent({
+    const result = await generateWithRetry({
       model: MODEL_NAME,
       contents,
       config: {
@@ -66,9 +97,13 @@ app.post('/api/generate', async (req, res) => {
     console.error('Erro ao chamar a API Gemini:', error?.message || error);
 
     const status = error?.status || error?.code || 500;
+    const isOverloaded = status === 503 || status === 429;
+
     res.status(typeof status === 'number' ? status : 500).json({
-      error: 'GEMINI_API_ERROR',
-      message: error?.message || 'Erro desconhecido ao chamar a API Gemini.',
+      error: isOverloaded ? 'MODEL_OVERLOADED' : 'GEMINI_API_ERROR',
+      message: isOverloaded
+        ? 'O modelo está com alta demanda no momento. Tentamos algumas vezes automaticamente, mas ainda não conseguimos resposta. Tente novamente em instantes.'
+        : (error?.message || 'Erro desconhecido ao chamar a API Gemini.'),
     });
   }
 });
@@ -133,3 +168,4 @@ server.listen(PORT, () => {
   console.log(`Modelo texto: ${MODEL_NAME} | Modelo voz: ${MODEL_LIVE}`);
   console.log(`Relay de voz disponível em ws://localhost:${PORT}/live`);
 });
+  
